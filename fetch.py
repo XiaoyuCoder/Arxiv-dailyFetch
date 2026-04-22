@@ -501,8 +501,8 @@ def send(html_body: str):
 #   cat:    限定 arXiv 分类
 
 _MODULES = [
-    ("具身智能",
-     'cat:cs.RO OR cat:cs.AI AND (all:VLA OR all:"vision language action" OR all:"embodied agent" OR all:"embodied AI" OR all:"physical AI" OR all:"robot manipulation" OR all:"dual-arm" OR all:"bimanual" OR ti:dexterous OR all:"whole-body" OR all:"in-hand manipulation" OR all:"imitation learning" OR all:"behavior cloning" OR all:dAgger OR all:LfD OR all:"reinforcement learning" OR ti:manipulation OR all:"visual navigation" OR all:ObjectNav OR all:"point-goal" OR all:"sim-to-real" OR all:"domain randomization")'),
+     ("AI Agent",
+     'cat:cs.AI OR cat:cs.HC OR cat:cs.MA AND (all:"agent" OR all:"multimodal agent" OR all:"visual agent" OR all:"GUI agent" OR all:"web agent" OR all:"tool use" OR all:"tool learning" OR all:"function calling" OR all:RAG OR all:"retrieval-augmented" OR all:"memory agent" OR all:"multi-agent" OR all:"agent collaboration" OR all:"agent swarm" OR all:"autonomous agent" OR all:"interactive agent")'),
 
     ("多模态大模型",
      'cat:cs.CV OR cat:cs.CL OR cat:cs.LG AND (all:"multimodal LLM" OR all:"vision language model" OR ti:LVLM OR all:LLaVA OR all:Vary OR all:Grounding OR all:InternVL OR all:CLIP OR all:BLIP OR all:SigLIP OR all:"LLaMA-Factory" OR all:LoRA OR all:"instruction tuning")'),
@@ -513,8 +513,9 @@ _MODULES = [
     ("图像生成 & 理解",
      'cat:cs.CV AND (all:"diffusion model" OR all:"text-to-image" OR all:"text-to-video" OR all:"image generation" OR all:"visual reasoning" OR all:VQA OR all:"visual question answering" OR all:"image captioning" OR all:"visual program" OR all:"Multimodal OCR" OR all:"document understanding" OR all:"visual chain-of-thought" OR all:GAN OR all:VAE)'),
 
-    ("AI Agent",
-     'cat:cs.AI OR cat:cs.HC OR cat:cs.MA AND (all:"agent" OR all:"multimodal agent" OR all:"visual agent" OR all:"GUI agent" OR all:"web agent" OR all:"tool use" OR all:"tool learning" OR all:"function calling" OR all:RAG OR all:"retrieval-augmented" OR all:"memory agent" OR all:"multi-agent" OR all:"agent collaboration" OR all:"agent swarm" OR all:"autonomous agent" OR all:"interactive agent")'),
+    ("具身智能",
+    'cat:cs.RO OR cat:cs.AI AND (all:VLA OR all:"vision language action" OR all:"embodied agent" OR all:"embodied AI" OR all:"physical AI" OR all:"robot manipulation" OR all:"dual-arm" OR all:"bimanual" OR ti:dexterous OR all:"whole-body" OR all:"in-hand manipulation" OR all:"imitation learning" OR all:"behavior cloning" OR all:dAgger OR all:LfD OR all:"reinforcement learning" OR ti:manipulation OR all:"visual navigation" OR all:ObjectNav OR all:"point-goal" OR all:"sim-to-real" OR all:"domain randomization")'),
+
 ]
 
 
@@ -523,7 +524,7 @@ def main():
         print("[warn] Gemini API 未配置，跳过 AI 摘要（请确认 GEMINI_API_KEY 环境变量已设置）")
     sections = {}
     for name, query in _MODULES:
-        n = 20 if name == "具身智能" else 10
+        n = 20 if name == "AI Agent" else 10
         print(f"[*] Fetching — {name} (max={n}) …")
         sections[name] = fetch(query, max_results=n)
 

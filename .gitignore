@@ -5,7 +5,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
+.eggs/a
 dist/
 build/
 
