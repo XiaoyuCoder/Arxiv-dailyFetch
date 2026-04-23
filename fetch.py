@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, ssl, smtplib, socket, time, html, threading
+import os, ssl, smtplib, socket, time, html, threading, json
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import List
+from typing import Dict, List
 
 import requests, feedparser
 from dotenv import load_dotenv
@@ -159,7 +159,7 @@ def _http_get(url: str) -> str:
     raise RuntimeError("Failed after retries")
 
 
-def fetch(query: str, hours: int = 24, max_results: int = 10) -> List[dict]:
+def fetch(query: str, hours: int = 24, max_results: int = 10, with_ai_summary: bool = True) -> List[dict]:
     since_utc = datetime.now(timezone.utc) - timedelta(hours=hours)
     url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&sortOrder=descending&max_results={max_results}"
     raw = _http_get(url)
@@ -171,7 +171,7 @@ def fetch(query: str, hours: int = 24, max_results: int = 10) -> List[dict]:
             continue
         title_en = e.title.replace("\n", " ")
         summ_en  = e.summary.replace("\n", " ")
-        ai_sum = _ai_summary(title_en, summ_en)
+        ai_sum = _ai_summary(title_en, summ_en) if with_ai_summary else ""
         out.append({
             "title_en":  title_en,
             "title_zh":  ai_sum or title_en,   # 有 AI 摘要就用，没有则显示原文标题
@@ -185,6 +185,241 @@ def fetch(query: str, hours: int = 24, max_results: int = 10) -> List[dict]:
     else:
         print(f"\t → {len(out)} papers")
     return out
+
+
+def _target_count(name: str) -> int:
+    return 20 if name == "大语言模型" else 10
+
+
+def _normalize_text(text: str, limit: int) -> str:
+    return " ".join((text or "").split())[:limit]
+
+
+def _extract_json_blob(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+
+    if "```" in text:
+        for block in text.split("```"):
+            candidate = block.strip()
+            if candidate.startswith("json"):
+                candidate = candidate[4:].strip()
+            if candidate.startswith("{") or candidate.startswith("["):
+                text = candidate
+                break
+
+    obj_pos = text.find("{")
+    arr_pos = text.find("[")
+
+    if obj_pos == -1 and arr_pos == -1:
+        return text
+
+    if obj_pos == -1 or (arr_pos != -1 and arr_pos < obj_pos):
+        start, end = arr_pos, text.rfind("]")
+    else:
+        start, end = obj_pos, text.rfind("}")
+
+    if end == -1 or end < start:
+        return text[start:]
+    return text[start:end + 1]
+
+
+def _parse_score_map(raw_text: str, expected_count: int) -> Dict[int, float]:
+    blob = _extract_json_blob(raw_text)
+    if not blob:
+        return {}
+
+    try:
+        data = json.loads(blob)
+    except Exception as e:
+        print(f"[warn] 相关度评分 JSON 解析失败: {e}")
+        return {}
+
+    score_map: Dict[int, float] = {}
+
+    def _save(idx, score):
+        try:
+            i = int(idx)
+            s = float(score)
+        except (TypeError, ValueError):
+            return
+        if i < 1 or i > expected_count:
+            return
+        score_map[i] = max(0.0, min(100.0, s))
+
+    if isinstance(data, dict):
+        if isinstance(data.get("scores"), list):
+            for item in data["scores"]:
+                if isinstance(item, dict):
+                    _save(item.get("idx"), item.get("score"))
+        else:
+            for k, v in data.items():
+                _save(k, v)
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                _save(item.get("idx"), item.get("score"))
+
+    return score_map
+
+
+def _build_rank_user_prompt(category_name: str, query: str, papers: List[dict]) -> str:
+    lines = []
+    for idx, p in enumerate(papers, 1):
+        title = _normalize_text(p.get("title_en", ""), 220)
+        abstract = _normalize_text(p.get("abs_en", ""), 420)
+        lines.append(f"[{idx}] title: {title}\nabstract: {abstract}")
+
+    fmt = '{"scores":[{"idx":1,"score":88},{"idx":2,"score":13}]}'
+    return (
+        f"目标类别：{category_name}\n"
+        f"该类别的 arXiv 检索式：{query}\n\n"
+        "请基于题目和摘要判断每篇论文与目标类别的匹配相关度，分数范围 0-100：\n"
+        "100=高度相关，60=中等相关，0=基本无关。\n\n"
+        "打分提示：优先提升 大语言模型（LLM）或者 图神经网络（GNN）相关技术高度相关的论文分数。\n\n"
+        "输出要求：\n"
+        "1) 只输出 JSON，不要输出其他解释。\n"
+        "2) 覆盖所有 idx。\n"
+        f"3) 输出格式固定为：{fmt}\n\n"
+        f"候选论文（共 {len(papers)} 篇）：\n\n"
+        + "\n\n".join(lines)
+    )
+
+
+def _rank_with_glm(system_prompt: str, user_prompt: str) -> str:
+    glm_key = os.getenv("GLM_API_KEY")
+    if not glm_key:
+        return ""
+    payload = {
+        "model": "glm-4-flash",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.0,
+    }
+    r = requests.post(
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {glm_key}", "Content-Type": "application/json"},
+        timeout=90,
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def _rank_with_deepseek(system_prompt: str, user_prompt: str) -> str:
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    if not deepseek_key:
+        return ""
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.0,
+    }
+    r = requests.post(
+        "https://api.deepseek.com/v1/chat/completions",
+        json=payload,
+        headers={"Authorization": f"Bearer {deepseek_key}", "Content-Type": "application/json"},
+        timeout=90,
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def _rank_with_gemini(system_prompt: str, user_prompt: str) -> str:
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        return ""
+    try:
+        from google import genai
+    except ImportError:
+        return ""
+
+    client = genai.Client(api_key=gemini_key)
+    prompt = system_prompt + "\n\n" + user_prompt
+    resp = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
+    return (resp.text or "").strip()
+
+
+def _llm_score_map(category_name: str, query: str, papers: List[dict]) -> Dict[int, float]:
+    if not papers:
+        return {}
+
+    system_prompt = (
+        "你是 arXiv 论文相关度排序助手。"
+        "你的输出必须是合法 JSON，且只能包含评分结果，不得输出额外文本。"
+    )
+    user_prompt = _build_rank_user_prompt(category_name, query, papers)
+
+    rankers = [
+        ("GLM (glm-4-flash)", _rank_with_glm),
+        ("DeepSeek (deepseek-chat)", _rank_with_deepseek),
+        ("Gemini (gemini-2.0-flash)", _rank_with_gemini),
+    ]
+    for name, fn in rankers:
+        try:
+            raw = fn(system_prompt, user_prompt)
+            if not raw:
+                continue
+            score_map = _parse_score_map(raw, len(papers))
+            if score_map:
+                print(f"\t [rank] {name} 评分成功: {len(score_map)}/{len(papers)}")
+                return score_map
+            print(f"\t [warn] {name} 评分返回无法解析，切换下一提供商")
+        except Exception as e:
+            print(f"\t [warn] {name} 评分失败: {e}")
+    return {}
+
+
+def _rerank_papers_by_relevance(category_name: str, query: str, papers: List[dict]) -> List[dict]:
+    if len(papers) <= 1:
+        return papers
+
+    score_map = _llm_score_map(category_name, query, papers)
+    if not score_map:
+        print(f"\t [warn] {category_name} 评分不可用，回退 arXiv 默认顺序")
+        return papers
+
+    ranked = []
+    for idx, paper in enumerate(papers, 1):
+        one = dict(paper)
+        one["rel_score"] = score_map.get(idx, 0.0)
+        ranked.append(one)
+
+    ranked.sort(key=lambda x: x.get("rel_score", 0.0), reverse=True)
+    return ranked
+
+
+def _hydrate_summaries(papers: List[dict]):
+    if not papers or not _providers:
+        return
+    for p in papers:
+        if p.get("abs_ai"):
+            continue
+        p["abs_ai"] = _ai_summary(p["title_en"], p["abs_en"]) or ""
+
+
+def send_ai(hours: int = 24, fetch_size: int = 60):
+    sections = {}
+    for name, query in _MODULES:
+        target_n = _target_count(name)
+        print(f"[*] AI-Rerank Fetching — {name} (fetch={fetch_size}, keep={target_n}) …")
+        candidates = fetch(query, hours=hours, max_results=fetch_size, with_ai_summary=False)
+        ranked = _rerank_papers_by_relevance(name, query, candidates)
+        selected = ranked[:target_n]
+        print(f"\t [pick] {name}: selected {len(selected)}/{len(candidates)}")
+        _hydrate_summaries(selected)  # 先排序再生成摘要，只对入选论文调用摘要
+        sections[name] = selected
+
+    send(build_email(sections))
 
 # ---------- 响应式 HTML 生成 --------------------------------------------------- #
 _META = """
@@ -449,7 +684,7 @@ def build_email(sections: dict) -> str:
 <body>
 <div class="container">
   <div class="masthead">
-    <h1>arXiv Daily · for Xiaoyu {ai_badge}</h1>
+    <h1>arXiv Daily for Xiaoyu {ai_badge}</h1>
     <div class="subtitle">更新时间：{now_bj} (北京时间)</div>
     <div class="ai-badge">{_ai_provider or "Gemini 2.0 Flash"}</div>
   </div>
@@ -468,7 +703,7 @@ def send(html_body: str):
     to   = [x.strip() for x in os.environ["EMAIL_TO"].split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Daily arXiv Fetch"
+    msg["Subject"] = "Daily arXiv Fetch 每日arXiv论文推送"
     msg["From"] = user
     msg["To"] = ", ".join(to)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
@@ -501,14 +736,16 @@ def send(html_body: str):
 #   cat:    限定 arXiv 分类
 
 _MODULES = [
-     ("AI Agent",
-     'cat:cs.AI OR cat:cs.HC OR cat:cs.MA AND (all:"agent" OR all:"multimodal agent" OR all:"visual agent" OR all:"GUI agent" OR all:"web agent" OR all:"tool use" OR all:"tool learning" OR all:"function calling" OR all:RAG OR all:"retrieval-augmented" OR all:"memory agent" OR all:"multi-agent" OR all:"agent collaboration" OR all:"agent swarm" OR all:"autonomous agent" OR all:"interactive agent")'),
+
+    ("大语言模型",
+     'cat:cs.CL OR cat:cs.LG OR cat:cs.AI AND (all:"large language model" OR all:LLM OR all:"foundation model" OR all:"language model" OR all:"instruction tuning" OR all:"supervised fine-tuning" OR all:"parameter-efficient fine-tuning" OR all:PEFT OR all:LoRA OR all:"in-context learning" OR all:"prompt tuning" OR all:"chain-of-thought" OR all:RLHF OR all:DPO OR all:"model alignment" OR all:"reasoning model" OR all:"long context")'
+    ),
+
+    ("AI Agent",
+     'cat:cs.AI OR cat:cs.HC OR cat:cs.MA AND (all:"agent" OR all:"multimodal agent" OR all:"visual agent" OR all:"GUI agent" OR all:"web agent" OR all:"tool use" OR all:"tool learning" OR all:"function calling" OR all:RAG OR all:"retrieval-augmented" OR all:"memory agent" OR all:"multi-agent" OR all:"agent collaboration" OR all:"agent swarm" OR all:"autonomous agent" OR all:"interactive agent" OR all:"rag")'),
 
     ("多模态大模型",
      'cat:cs.CV OR cat:cs.CL OR cat:cs.LG AND (all:"multimodal LLM" OR all:"vision language model" OR ti:LVLM OR all:LLaVA OR all:Vary OR all:Grounding OR all:InternVL OR all:CLIP OR all:BLIP OR all:SigLIP OR all:"LLaMA-Factory" OR all:LoRA OR all:"instruction tuning")'),
-
-    ("世界模型 & 规划",
-     'cat:cs.RO OR cat:cs.AI AND (all:"world model" OR all:"visual planning" OR all:"task planning" OR all:"motion planning" OR ti:reasoning OR all:"coarse-to-fine" OR all:"video prediction" OR all:"future prediction")'),
 
     ("图像生成 & 理解",
      'cat:cs.CV AND (all:"diffusion model" OR all:"text-to-image" OR all:"text-to-video" OR all:"image generation" OR all:"visual reasoning" OR all:VQA OR all:"visual question answering" OR all:"image captioning" OR all:"visual program" OR all:"Multimodal OCR" OR all:"document understanding" OR all:"visual chain-of-thought" OR all:GAN OR all:VAE)'),
@@ -522,13 +759,18 @@ _MODULES = [
 def main():
     if not _providers:
         print("[warn] Gemini API 未配置，跳过 AI 摘要（请确认 GEMINI_API_KEY 环境变量已设置）")
-    sections = {}
-    for name, query in _MODULES:
-        n = 20 if name == "AI Agent" else 10
-        print(f"[*] Fetching — {name} (max={n}) …")
-        sections[name] = fetch(query, max_results=n)
 
-    send(build_email(sections))
+    # # 第一次：模式匹配发送
+    # sections = {}
+    # for name, query in _MODULES:
+    #     n = _target_count(name)
+    #     print(f"[*] Fetching — {name} (max={n}) …")
+    #     sections[name] = fetch(query, max_results=n)
+    # send(build_email(sections))
+
+    # 第二次：先按每类抓 60 -> 相关度排序 -> 截断 -> 再生成摘要 -> 发送
+    print("[*] First send done. Start second send with AI rerank ...")
+    send_ai(hours=24, fetch_size=60)
 
 
 if __name__ == "__main__":
