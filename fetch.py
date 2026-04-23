@@ -449,7 +449,7 @@ def build_email(sections: dict) -> str:
 <body>
 <div class="container">
   <div class="masthead">
-    <h1>arXiv Daily · made by Zhambur{ai_badge}</h1>
+    <h1>arXiv Daily · for Xiaoyu {ai_badge}</h1>
     <div class="subtitle">更新时间：{now_bj} (北京时间)</div>
     <div class="ai-badge">{_ai_provider or "Gemini 2.0 Flash"}</div>
   </div>
