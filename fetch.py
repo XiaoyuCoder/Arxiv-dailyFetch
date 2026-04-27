@@ -14,7 +14,7 @@ load_dotenv()
 # ---------------------- 全局限速器 ---------------------- #
 _rate_lock = threading.Lock()
 _last_request_time = 0.0
-MIN_INTERVAL = 32  # 秒，最少等这么久才发下一条（arXiv 每分钟最多 3 条，取 32s 留余量）
+MIN_INTERVAL = 34  # 秒，最少等这么久才发下一条（arXiv 每分钟最多 3 条，取 32s 留余量）
 
 
 def _rate_limited_get(session: requests.Session, url: str, timeout: int) -> requests.Response:
@@ -135,7 +135,7 @@ ARXIV_API = (
     "https://export.arxiv.org/api/query"
     "?search_query={query}&sortBy=submittedDate&sortOrder=descending&max_results=10"
 )
-HTTP_TIMEOUT, RETRY, BACKOFF = 60, 5, 20
+HTTP_TIMEOUT, RETRY, BACKOFF = 80, 8, 40
 
 _session = requests.Session()
 
@@ -276,7 +276,7 @@ def _build_rank_user_prompt(category_name: str, query: str, papers: List[dict]) 
         f"目标类别：{category_name}\n"
         f"该类别的 arXiv 检索式：{query}\n\n"
         "请基于题目和摘要判断每篇论文与目标类别的匹配相关度，分数范围 0-100：\n"
-        "100=高度相关，60=中等相关，0=基本无关。\n\n"
+        "70-100高度相关，40-70中等相关，0-40基本无关。\n\n"
         "打分提示：优先提升 大语言模型（LLM）或者 图神经网络（GNN）相关技术高度相关的论文分数。\n\n"
         "输出要求：\n"
         "1) 只输出 JSON，不要输出其他解释。\n"
@@ -407,7 +407,7 @@ def _hydrate_summaries(papers: List[dict]):
         p["abs_ai"] = _ai_summary(p["title_en"], p["abs_en"]) or ""
 
 
-def send_ai(hours: int = 24, fetch_size: int = 60):
+def send_ai(hours: int = 24, fetch_size: int = 50):
     sections = {}
     for name, query in _MODULES:
         target_n = _target_count(name)
@@ -770,7 +770,7 @@ def main():
 
     # 第二次：先按每类抓 60 -> 相关度排序 -> 截断 -> 再生成摘要 -> 发送
     print("[*] First send done. Start second send with AI rerank ...")
-    send_ai(hours=24, fetch_size=60)
+    send_ai(hours=24, fetch_size=50)
 
 
 if __name__ == "__main__":
